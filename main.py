@@ -184,7 +184,7 @@ async def search_knowledge_base(question: str, top_k: int = 3):
                 # Извлекаем текст из поля, которое вы использовали при загрузке
                 # Адаптируйте ключи под вашу структуру метаданных в Pinecone
                 # Например, если вы использовали field_map={"text": "chunk_text"}
-                text = fields.get('chunk_text') or fields.get('text') or fields.get('content') or fields.get('preview') or f"Документ ID: {match.get('id', 'N/A')}"
+                text = fields.get('content') or fields.get('title') or fields.get('preview') or f"Документ ID: {match.get('id', 'N/A')}"
                 contexts.append(text)
 
                 source = fields.get('source', 'Неизвестный источник')
