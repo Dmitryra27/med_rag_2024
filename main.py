@@ -14,7 +14,7 @@ import httpx
 import json
 import traceback
 import asyncio
-import datetime
+from datetime import datetime, timezone
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -33,9 +33,9 @@ INITIALIZATION_ERROR = None # Переменная для хранения ош�
 PROJECT_ID = os.environ.get("PROJECT_ID", "ai-project-26082025")
 REGION = os.environ.get("REGION", "us-central1")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "med-index")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical_knowledge")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
-YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID")
+YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID",'b1gatnfegvh5a9a5iovu')
 YANDEX_GPT_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest" if YANDEX_FOLDER_ID else None
 MAX_CONTEXT_LENGTH = int(os.environ.get("MAX_CONTEXT_LENGTH", 5000)) # Ограничение длины контекста
 
@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
         logger.info("🧠 Загрузка модели генерации gemini-2.5-pro...")
         try:
             # Попробуем сначала 2.5-pro, если недоступна, используем 1.5-pro
-            gemini_model = GenerativeModel("gemini-2.5-pro-001")
+            gemini_model = GenerativeModel("gemini-2.5-pro")
         except Exception as e25:
             logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-2.5-pro...")
             try:
@@ -388,7 +388,7 @@ async def health_check():
                 }
             },
             "initialization_error": INITIALIZATION_ERROR,
-            "timestamp": datetime.utcnow().isoformat() + "Z"
+            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         }
     except Exception as e:
         logger.error(f"Ошибка в /health: {e}")
