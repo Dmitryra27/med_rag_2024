@@ -33,7 +33,7 @@ INITIALIZATION_ERROR = None # Переменная для хранения ош�
 PROJECT_ID = os.environ.get("PROJECT_ID", "ai-project-26082025")
 REGION = os.environ.get("REGION", "us-central1")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
-PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical_knowledge")
+PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical-knowledge")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID",'b1gatnfegvh5a9a5iovu')
 YANDEX_GPT_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest" if YANDEX_FOLDER_ID else None
@@ -388,7 +388,7 @@ async def health_check():
                 }
             },
             "initialization_error": INITIALIZATION_ERROR,
-            timestamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     except Exception as e:
         logger.error(f"Ошибка в /health: {e}")
