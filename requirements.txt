@@ -1,0 +1,7 @@
+# requirements.txt
+fastapi>=0.104.1
+uvicorn[standard]>=0.24.0
+google-cloud-aiplatform[vertexai]>=1.38.1 # Для TextEmbeddingModel и GenerativeModel
+pinecone>=5.0.0 # Используем более новую версию
+python-multipart>=0.0.6
+requests
