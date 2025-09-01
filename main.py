@@ -14,6 +14,7 @@ import httpx
 import json
 import traceback
 import asyncio
+import datetime
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -56,11 +57,11 @@ async def lifespan(app: FastAPI):
             # Попробуем сначала 2.5-pro, если недоступна, используем 1.5-pro
             gemini_model = GenerativeModel("gemini-2.5-pro-001")
         except Exception as e25:
-            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-1.5-pro...")
+            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-2.5-pro...")
             try:
-                gemini_model = GenerativeModel("gemini-1.5-pro-001")
+                gemini_model = GenerativeModel("gemini-2.5-pro")
             except Exception as e15:
-                logger.error(f"❌ Ошибка загрузки модели Gemini 1.5-pro: {e15}")
+                logger.error(f"❌ Ошибка загрузки модели Gemini 2.5-pro: {e15}")
                 gemini_model = None
         if gemini_model:
             logger.info("✅ Модель генерации Gemini загружена.")

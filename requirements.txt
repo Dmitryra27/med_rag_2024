@@ -5,3 +5,4 @@ google-cloud-aiplatform[vertexai]>=1.38.1 # Для TextEmbeddingModel и Generat
 pinecone>=5.0.0 # Используем более новую версию
 python-multipart>=0.0.6
 requests
+datetime
