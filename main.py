@@ -145,53 +145,63 @@ class AnswerResponse(BaseModel):
     mode: str
 
 # --- Вспомогательные функции ---
-async def search_knowledge_base(question: str, top_k: int = 3):
+# main.py (на Render) - Исправленный фрагмент функции search_knowledge_base
+
+# Убедитесь, что у вас есть глобальный объект клиента Pinecone
+# Обычно создается в lifespan handler:
+# pc = Pinecone(api_key=PINECONE_API_KEY)
+
+def search_knowledge_base(question: str, top_k: int = 3):
     """Поиск по базе знаний Pinecone с использованием встроенной модели Llama."""
-    if not pinecone_index or not pinecone_client:
-        logger.warning("База знаний недоступна (Pinecone не инициализирован)")
+    global pinecone_index, pc # pc - это ваш глобальный клиент Pinecone
+
+    if not pinecone_index:
+        logger.warning("База знаний недоступна (индекс Pinecone не инициализирован)")
         return ["База знаний недоступна"], ["Система"]
 
     try:
         logger.debug(f"🔍 Поиск в Pinecone по запросу: '{question}'...")
 
-        # 1. Используем встроенную модель Pinecone для создания эмбеддинга и поиска
-        # Метод index.search принимает текст напрямую и использует встроенную модель
-        embedding_response = pinecone_index.embed(
-            model="llama-text-embed-v2", # Используем встроенную модель
-            inputs=[question], # Список текстов для векторизации
+        # --- 1. Создание эмбеддинга для вопроса с помощью Inference API Pinecone ---
+        logger.debug("🧠 Создание эмбеддинга для вопроса с помощью Pinecone Inference API...")
+
+        # Используем метод embed у КЛИЕНТА Pinecone (pc), а не у индекса
+        # Модель llama-text-embed-v2
+        embedding_response = pc.inference.embed(
+            model="llama-text-embed-v2",
+            inputs=[question], # Список текстов
             parameters={
-                "input_type": "query", # Тип входных данных
-                "truncate": "END"      # Как обрезать длинные тексты
+                "input_type": "query", # Тип входных данных - запрос
+                "truncate": "END"      # Как обрезать, если текст слишком длинный
             }
         )
+
         # Извлекаем значения вектора
         question_embedding = embedding_response.data[0].values
+        logger.debug(f"   Эмбеддинг создан (размерность: {len(question_embedding)})")
 
-        # 3. Поиск по вектору
+        # --- 2. Поиск по векторной базе данных ---
+        logger.debug("🔎 Выполнение поиска в векторной базе данных...")
         search_results = pinecone_index.query(
-            vector=question_embedding, # Вектор для поиска
-            top_k=3,                  # Количество результатов
-            include_metadata=True,    # Включаем метаданные
-            namespace=""             # Пространство имен (по умолчанию)
-            # filter={}             # Можно добавить фильтр по метаданным
+            vector=question_embedding, # Используем созданный вектор
+            top_k=top_k,
+            include_metadata=True
         )
+        logger.debug(f"   Поиск завершен. Найдено {len(search_results.matches)} результатов.")
 
-        logger.debug(f"   Поиск завершен. Ответ от Pinecone: {type(search_results)}")
-
+        # --- 3. Обработка результатов ---
         contexts = []
         sources = []
-        matches = search_results.get('results', {}).get('hits', [])
 
-        if matches:
-            for match in matches:
-                fields = match.get('fields', {})
-                # Извлекаем текст из поля, которое вы использовали при загрузке
-                # Адаптируйте ключи под вашу структуру метаданных в Pinecone
-                # Например, если вы использовали field_map={"text": "chunk_text"}
-                text = fields.get('content') or fields.get('title') or fields.get('preview') or f"Документ ID: {match.get('id', 'N/A')}"
+        if search_results.matches:
+            for match in search_results.matches:
+                metadata = match.metadata or {}
+                # Адаптируйте ключи под структуру ваших метаданных в Pinecone
+                # Например: 'content', 'text', 'chunk_text', 'preview'
+                text = metadata.get('content') or metadata.get('text') or metadata.get('chunk_text') or metadata.get('preview') or f"Документ ID: {match.id}"
                 contexts.append(text)
 
-                source = fields.get('source', 'Неизвестный источник')
+                source = metadata.get('source', 'Неизвестный источник')
                 sources.append(source)
         else:
             logger.info("   Ничего не найдено в базе знаний.")
