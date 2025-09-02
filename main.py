@@ -151,9 +151,9 @@ class AnswerResponse(BaseModel):
 # Обычно создается в lifespan handler:
 # pc = Pinecone(api_key=PINECONE_API_KEY)
 
-def search_knowledge_base(question: str, top_k: int = 3):
-    """Поиск по базе знаний Pinecone с использованием встроенной модели Llama."""
-    global pinecone_index, pc # pc - это ваш глобальный клиент Pinecone
+async def search_knowledge_base(question: str, top_k: int = 3):
+    """Асинхронный поиск по базе знаний Pinecone с использованием встроенной модели Llama."""
+    global pinecone_index, pc
 
     if not pinecone_index:
         logger.warning("База знаний недоступна (индекс Pinecone не инициализирован)")
@@ -162,17 +162,17 @@ def search_knowledge_base(question: str, top_k: int = 3):
     try:
         logger.debug(f"🔍 Поиск в Pinecone по запросу: '{question}'...")
 
-        # --- 1. Создание эмбеддинга для вопроса с помощью Inference API Pinecone ---
+        # --- 1. Создание эмбеддинга для вопроса с помощью Inference API Pinecone (асинхронно) ---
         logger.debug("🧠 Создание эмбеддинга для вопроса с помощью Pinecone Inference API...")
 
-        # Используем метод embed у КЛИЕНТА Pinecone (pc), а не у индекса
-        # Модель llama-text-embed-v2
-        embedding_response = pc.inference.embed(
+        # Оборачиваем блокирующий вызов в asyncio.to_thread
+        embedding_response = await asyncio.to_thread(
+            pc.inference.embed,
             model="llama-text-embed-v2",
-            inputs=[question], # Список текстов
+            inputs=[question],
             parameters={
-                "input_type": "query", # Тип входных данных - запрос
-                "truncate": "END"      # Как обрезать, если текст слишком длинный
+                "input_type": "query",
+                "truncate": "END"
             }
         )
 
@@ -180,13 +180,17 @@ def search_knowledge_base(question: str, top_k: int = 3):
         question_embedding = embedding_response.data[0].values
         logger.debug(f"   Эмбеддинг создан (размерность: {len(question_embedding)})")
 
-        # --- 2. Поиск по векторной базе данных ---
+        # --- 2. Поиск по векторной базе данных (асинхронно) ---
         logger.debug("🔎 Выполнение поиска в векторной базе данных...")
-        search_results = pinecone_index.query(
-            vector=question_embedding, # Используем созданный вектор
+
+        # Оборачиваем блокирующий вызов query в asyncio.to_thread
+        search_results = await asyncio.to_thread(
+            pinecone_index.query,
+            vector=question_embedding,
             top_k=top_k,
             include_metadata=True
         )
+
         logger.debug(f"   Поиск завершен. Найдено {len(search_results.matches)} результатов.")
 
         # --- 3. Обработка результатов ---
@@ -197,7 +201,6 @@ def search_knowledge_base(question: str, top_k: int = 3):
             for match in search_results.matches:
                 metadata = match.metadata or {}
                 # Адаптируйте ключи под структуру ваших метаданных в Pinecone
-                # Например: 'content', 'text', 'chunk_text', 'preview'
                 text = metadata.get('content') or metadata.get('text') or metadata.get('chunk_text') or metadata.get('preview') or f"Документ ID: {match.id}"
                 contexts.append(text)
 
