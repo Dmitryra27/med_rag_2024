@@ -16,6 +16,7 @@ import json
 import traceback
 import asyncio
 from datetime import datetime, timezone
+import requests
 
 # --- Настройка логирования ---
 logging.basicConfig(
