@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pinecone import Pinecone
 from pydantic import BaseModel
 from typing import List, Optional
 import vertexai
@@ -34,6 +35,7 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "ai-project-26082025")
 REGION = os.environ.get("REGION", "us-central1")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical-knowledge")
+
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID",'b1gatnfegvh5a9a5iovu')
 YANDEX_GPT_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest" if YANDEX_FOLDER_ID else None
@@ -77,9 +79,10 @@ async def lifespan(app: FastAPI):
 
         # Создаем клиент Pinecone
         pinecone_client = pinecone.Pinecone(api_key=PINECONE_API_KEY)
-
+        pc = pinecone.Pinecone(api_key=PINECONE_API_KEY)
         # Подключаемся к индексу
         pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
+        index = pinecone_client.Index(PINECONE_INDEX_NAME)
 
         # Проверка подключения и получения статистики
         index_stats = pinecone_index.describe_index_stats()
@@ -153,7 +156,7 @@ class AnswerResponse(BaseModel):
 
 async def search_knowledge_base(question: str, top_k: int = 3):
     """Асинхронный поиск по базе знаний Pinecone с использованием встроенной модели Llama."""
-    global pinecone_index, pc
+    global pinecone_index, pinecone_client
 
     if not pinecone_index:
         logger.warning("База знаний недоступна (индекс Pinecone не инициализирован)")
@@ -167,13 +170,14 @@ async def search_knowledge_base(question: str, top_k: int = 3):
 
         # Оборачиваем блокирующий вызов в asyncio.to_thread
         embedding_response = await asyncio.to_thread(
-            pc.inference.embed,
+            pinecone_client.inference.embed,
             model="llama-text-embed-v2",
             inputs=[question],
             parameters={
                 "input_type": "query",
                 "truncate": "END"
             }
+
         )
 
         # Извлекаем значения вектора
