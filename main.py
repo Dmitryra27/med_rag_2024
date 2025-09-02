@@ -156,20 +156,24 @@ async def search_knowledge_base(question: str, top_k: int = 3):
 
         # 1. Используем встроенную модель Pinecone для создания эмбеддинга и поиска
         # Метод index.search принимает текст напрямую и использует встроенную модель
-        search_results = pinecone_index.search(
-            namespace="", # Используем пространство имен по умолчанию
-            query={
-                "inputs": {
-                    "text": question # Текст запроса
-                },
-                # Параметры модели эмбеддингов Pinecone Llama
-                "parameters": {
-                    "input_type": "query", # Тип входных данных для запроса
-                    "dimension": 1024 # Размерность вектора для llama-text-embed-v2
-                    # truncate по умолчанию "END"
-                },
-                "top_k": top_k # Количество результатов
+        embedding_response = pinecone_index.embed(
+            model="llama-text-embed-v2", # Используем встроенную модель
+            inputs=[question], # Список текстов для векторизации
+            parameters={
+                "input_type": "query", # Тип входных данных
+                "truncate": "END"      # Как обрезать длинные тексты
             }
+        )
+        # Извлекаем значения вектора
+        question_embedding = embedding_response.data[0].values
+
+        # 3. Поиск по вектору
+        search_results = pinecone_index.query(
+            vector=question_embedding, # Вектор для поиска
+            top_k=3,                  # Количество результатов
+            include_metadata=True,    # Включаем метаданные
+            namespace=""             # Пространство имен (по умолчанию)
+            # filter={}             # Можно добавить фильтр по метаданным
         )
 
         logger.debug(f"   Поиск завершен. Ответ от Pinecone: {type(search_results)}")
