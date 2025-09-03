@@ -37,8 +37,8 @@ PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical-knowledge")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID",'b1gatnfegvh5a9a5iovu')
 YANDEX_GPT_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest" if YANDEX_FOLDER_ID else None
-MAX_CONTEXT_LENGTH = int(os.environ.get("MAX_CONTEXT_LENGTH", 5000)) # Ограничение длины контекста
-
+MAX_CONTEXT_LENGTH = int(os.environ.get("MAX_CONTEXT_LENGTH", 5000)) # Ограничение длины контекст
+google_credentials_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 # --- Lifespan handler для FastAPI ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,20 +48,46 @@ async def lifespan(app: FastAPI):
     try:
         # 1. Инициализация Vertex AI (для генерации ответов)
         logger.info(f"🔧 Инициализация Vertex AI: project={PROJECT_ID}, location={REGION}")
-        vertexai.init(project=PROJECT_ID, location=REGION)
-        logger.info("✅ Vertex AI инициализирована.")
+        # Проверяем наличие credentials в переменной окружения как JSON string
+        google_credentials_json = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 
+        if google_credentials_json:
+            # Используем credentials из JSON string
+            logger.info("🔐 Использование credentials из переменной окружения GOOGLE_APPLICATION_CREDENTIALS_JSON")
+            try:
+                import json
+                from google.oauth2 import service_account
+
+                # Парсим JSON credentials
+                credentials_info = json.loads(google_credentials_json)
+                credentials = service_account.Credentials.from_service_account_info(credentials_info)
+
+                vertexai.init(
+                    project=PROJECT_ID,
+                    location=REGION,
+                    credentials=credentials
+                )
+                logger.info("✅ Vertex AI инициализирован с service account credentials")
+            except Exception as e:
+                logger.error(f"❌ Ошибка инициализации с service account credentials: {e}")
+                # fallback на default credentials
+                logger.info("🔄 Использование default credentials как резервный вариант")
+                vertexai.init(project=PROJECT_ID, location=REGION)
+        else:
+            # Используем default credentials (если запущено в Google Cloud)
+            logger.info("🔐 Использование default credentials")
+            vertexai.init(project=PROJECT_ID, location=REGION)
         # 2. Инициализация модели Google Gemini (для генерации ответов)
         logger.info("🧠 Загрузка модели генерации gemini-2.5-pro...")
         try:
             # Попробуем сначала 2.5-pro, если недоступна, используем 1.5-pro
             gemini_model = GenerativeModel("gemini-2.5-pro")
         except Exception as e25:
-            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-1.5-pro...")
+            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-2.5-pro...")
             try:
-                gemini_model = GenerativeModel("gemini-1.5-pro")
+                gemini_model = GenerativeModel("gemini-2.5-pro")
             except Exception as e15:
-                logger.error(f"❌ Ошибка загрузки модели Gemini 1.5-pro: {e15}")
+                logger.error(f"❌ Ошибка загрузки модели Gemini 2.5-pro: {e15}")
                 gemini_model = None
         if gemini_model:
             logger.info("✅ Модель генерации Gemini загружена.")
