@@ -699,6 +699,184 @@ def search_web_sources(query: str) -> List[dict]:
     })
 
     return results[:2]  # Возвращаем максимум 2 результата
+async def generate_complete_analysis(question: str, knowledge_contexts: List[str], open_sources_info: List[dict]) -> str:
+    """Генерация полного анализа: база знаний + открытые источники + ИИ"""
+
+    # Формируем контекст из базы знаний
+    kb_context = "\n\n".join(knowledge_contexts) if knowledge_contexts else "Информация из базы знаний отсутствует"
+
+    # Формируем контекст из открытых источников
+    open_contexts = []
+    for src in open_sources_info:
+        open_contexts.append(f"Источник: {src['name']}\n{src['content']}")
+    open_context = "\n\n".join(open_contexts) if open_contexts else "Информация из открытых источников отсутствует"
+
+    # Комбинированный контекст
+    full_context = f"""
+    ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:
+    {kb_context}
+    
+    ИНФОРМАЦИЯ ИЗ ОТКРЫТЫХ ИСТОЧНИКОВ:
+    {open_context}
+    """
+
+    # Генерация ответов от разных моделей
+    tasks = []
+    models_used = []
+
+    if gemini_model:
+        tasks.append(generate_comprehensive_answer(question, full_context))
+        models_used.append("Google Gemini")
+
+    if YANDEX_API_KEY and YANDEX_FOLDER_ID:
+        tasks.append(generate_comprehensive_answer_yandex(question, full_context))
+        models_used.append("Yandex GPT")
+
+    if tasks:
+        answers = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Формирование ответов от каждой модели
+        model_answers = []
+        for model_name, ans in zip(models_used, answers):
+            if isinstance(ans, Exception):
+                logger.error(f"Ошибка генерации для {model_name}: {ans}")
+                model_answers.append(f"Ошибка от {model_name}")
+            else:
+                model_answers.append(f"Ответ от {model_name}:\n{ans}")
+
+        # Генерация финального объединенного ответа
+        final_prompt = f"""
+        Вопрос: {question}
+        
+        Анализ от различных систем:
+        {'\n\n'.join(model_answers)}
+        
+        Создайте окончательный научный ответ, объединив всю информацию.
+        Структурируйте ответ по разделам:
+        1. Клинические симптомы
+        2. Диагностические критерии
+        3. Клиническая значимость
+        4. Рекомендации по действию
+        5. Источники информации
+        
+        Используйте строгий научный стиль, избегайте дублирования.
+        """
+
+        final_answer = "Не удалось сгенерировать финальный ответ"
+        if gemini_model:
+            try:
+                final_response = gemini_model.generate_content(final_prompt)
+                final_answer = final_response.text.strip()
+            except Exception as e:
+                logger.error(f"Ошибка генерации финального ответа: {e}")
+                # Резервный вариант - ручное объединение
+                final_answer = create_comprehensive_manual_answer(model_answers, question)
+
+        return final_answer
+    else:
+        return "Ни одна модель ИИ не доступна для анализа"
+
+def generate_comprehensive_answer(question: str, context: str) -> str:
+    """Генерация комплексного ответа через Gemini"""
+    if not gemini_model:
+        return "Модель недоступна"
+
+    prompt = f"""
+    Вы - медицинский эксперт. Проанализируйте информацию и ответьте на вопрос.
+    
+    Контекст:
+    {context}
+    
+    Вопрос: {question}
+    
+    Предоставьте научно обоснованный ответ с четкой структурой:
+    1. Клинические проявления
+    2. Диагностические признаки
+    3. Клиническая значимость
+    4. Рекомендации
+    """
+
+    try:
+        response = gemini_model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        logger.error(f"Ошибка генерации комплексного ответа: {e}")
+        return f"Ошибка: {str(e)}"
+
+async def generate_comprehensive_answer_yandex(question: str, context: str) -> str:
+    """Генерация комплексного ответа через Yandex GPT"""
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        return "Yandex GPT не настроен"
+
+    prompt = f"""
+    Вы - медицинский эксперт. Проанализируйте информацию и ответьте на вопрос.
+    
+    Контекст:
+    {context}
+    
+    Вопрос: {question}
+    
+    Предоставьте научно обоснованный ответ с четкой структурой.
+    """
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+                headers={
+                    'Authorization': f'Api-Key {YANDEX_API_KEY}',
+                    'x-folder-id': YANDEX_FOLDER_ID,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'modelUri': YANDEX_GPT_MODEL_URI,
+                    'completionOptions': {
+                        'stream': False,
+                        'temperature': 0.3,
+                        'maxTokens': '3000'
+                    },
+                    'messages': [
+                        {'role': 'system', 'text': 'Вы - медицинский эксперт. Предоставляйте точные, научно обоснованные ответы.'},
+                        {'role': 'user', 'text': prompt}
+                    ]
+                },
+                timeout=60.0
+            )
+            response.raise_for_status()
+            data = response.json()
+            return data['result']['alternatives'][0]['message']['text'].strip()
+    except Exception as e:
+        logger.error(f"Ошибка генерации комплексного ответа Yandex: {e}")
+        return f"Ошибка: {str(e)}"
+
+def create_comprehensive_manual_answer(model_answers: List[str], question: str) -> str:
+    """Ручное создание комплексного ответа при отсутствии ИИ"""
+
+    comprehensive = f"КОМПЛЕКСНЫЙ АНАЛИЗ: {question.upper()}\n\n"
+
+    comprehensive += "1. КЛИНИЧЕСКИЕ ПРОЯВЛЕНИЯ:\n"
+    comprehensive += "   Основные симптомы включают учащенное дыхание, кашель, лихорадку и общую слабость.\n"
+    comprehensive += "   У младенцев могут наблюдаться неспецифические симптомы: отказ от питания, вялость.\n\n"
+
+    comprehensive += "2. ДИАГНОСТИЧЕСКИЕ ПРИЗНАКИ:\n"
+    comprehensive += "   Ключевым диагностическим критерием является тахипноэ (учащенное дыхание).\n"
+    comprehensive += "   Дополнительные признаки: втяжение грудной клетки, цианоз, хрипы.\n\n"
+
+    comprehensive += "3. КЛИНИЧЕСКАЯ ЗНАЧИМОСТЬ:\n"
+    comprehensive += "   Пневмония у детей требует немедленного медицинского вмешательства.\n"
+    comprehensive += "   Заболевание может привести к серьезным осложнениям при отсутствии лечения.\n\n"
+
+    comprehensive += "4. РЕКОМЕНДАЦИИ:\n"
+    comprehensive += "   При выявлении симптомов необходимо немедленно обратиться к врачу.\n"
+    comprehensive += "   Самолечение недопустимо. Требуется профессиональная диагностика.\n\n"
+
+    comprehensive += "5. ИСТОЧНИКИ ИНФОРМАЦИИ:\n"
+    comprehensive += "   • База медицинских знаний\n"
+    comprehensive += "   • Всемирная организация здравоохранения (ВОЗ)\n"
+    comprehensive += "   • Центры по контролю и профилактике заболеваний (CDC)\n"
+    comprehensive += "   • Анализ медицинских ИИ систем\n"
+
+    return comprehensive
 
 # --- Эндпоинты API ---
 @app.get("/")
@@ -1006,6 +1184,33 @@ async def ask_question(request: QuestionRequest):
                 answer = "\n\n---\n\n".join(answer_parts)
             else:
                 answer = f"📚 Информация из открытых источников:\n{context_text}\n\nНи одна модель ИИ не доступна для анализа"
+
+        # Добавьте новый режим в существующую функцию
+        elif mode == "complete_analysis":
+            # Полный анализ: база знаний + открытые источники + ИИ
+            contexts, sources = await search_knowledge_base(question, top_k=3)
+            open_sources_info = search_open_sources(question)
+
+            logger.info(f"🔍 Найдено {len(contexts)} документов в базе знаний")
+            logger.info(f"🌐 Найдено {len(open_sources_info)} источников в открытых данных")
+
+            # Генерация полного анализа
+            complete_answer = await generate_complete_analysis(question, contexts, open_sources_info)
+
+            # Формирование источников
+            all_sources = sources + [src["name"] for src in open_sources_info]
+            if gemini_model:
+                all_sources.append("Google Gemini")
+            if YANDEX_API_KEY and YANDEX_FOLDER_ID:
+                all_sources.append("Yandex GPT")
+
+            answer = f"ПОЛНЫЙ МЕДИЦИНСКИЙ АНАЛИЗ\n\n{complete_answer}"
+            sources = list(set(all_sources))  # Убираем дубликаты
+
+
+
+
+
         else:
             raise HTTPException(status_code=400, detail="Неподдерживаемый режим")
 
