@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pinecone import Pinecone
 from pydantic import BaseModel
 from typing import List, Optional
 import vertexai
@@ -16,7 +15,6 @@ import json
 import traceback
 import asyncio
 from datetime import datetime, timezone
-import requests
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -36,7 +34,6 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "ai-project-26082025")
 REGION = os.environ.get("REGION", "us-central1")
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 PINECONE_INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "medical-knowledge")
-
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID",'b1gatnfegvh5a9a5iovu')
 YANDEX_GPT_MODEL_URI = f"gpt://{YANDEX_FOLDER_ID}/yandexgpt/latest" if YANDEX_FOLDER_ID else None
@@ -60,11 +57,11 @@ async def lifespan(app: FastAPI):
             # Попробуем сначала 2.5-pro, если недоступна, используем 1.5-pro
             gemini_model = GenerativeModel("gemini-2.5-pro")
         except Exception as e25:
-            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-2.5-pro...")
+            logger.info("⚠️  Модель gemini-2.5-pro недоступна, пробуем gemini-1.5-pro...")
             try:
-                gemini_model = GenerativeModel("gemini-2.5-pro")
+                gemini_model = GenerativeModel("gemini-1.5-pro")
             except Exception as e15:
-                logger.error(f"❌ Ошибка загрузки модели Gemini 2.5-pro: {e15}")
+                logger.error(f"❌ Ошибка загрузки модели Gemini 1.5-pro: {e15}")
                 gemini_model = None
         if gemini_model:
             logger.info("✅ Модель генерации Gemini загружена.")
@@ -80,10 +77,9 @@ async def lifespan(app: FastAPI):
 
         # Создаем клиент Pinecone
         pinecone_client = pinecone.Pinecone(api_key=PINECONE_API_KEY)
-        pc = pinecone.Pinecone(api_key=PINECONE_API_KEY)
+
         # Подключаемся к индексу
         pinecone_index = pinecone_client.Index(PINECONE_INDEX_NAME)
-        index = pinecone_client.Index(PINECONE_INDEX_NAME)
 
         # Проверка подключения и получения статистики
         index_stats = pinecone_index.describe_index_stats()
@@ -140,7 +136,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # --- Модели данных ---
 class QuestionRequest(BaseModel):
     question: str
-    mode: str = "knowledge_base" # 'knowledge_base', 'combined_ai'
+    mode: str = "knowledge_base" # 'knowledge_base', 'combined_ai', 'unified_ai', 'open_sources', 'complete_analysis'
 
 class AnswerResponse(BaseModel):
     question: str
@@ -149,12 +145,6 @@ class AnswerResponse(BaseModel):
     mode: str
 
 # --- Вспомогательные функции ---
-# main.py (на Render) - Исправленный фрагмент функции search_knowledge_base
-
-# Убедитесь, что у вас есть глобальный объект клиента Pinecone
-# Обычно создается в lifespan handler:
-# pc = Pinecone(api_key=PINECONE_API_KEY)
-
 async def search_knowledge_base(question: str, top_k: int = 3):
     """Асинхронный поиск по базе знаний Pinecone с использованием встроенной модели Llama."""
     global pinecone_index, pinecone_client
@@ -166,19 +156,18 @@ async def search_knowledge_base(question: str, top_k: int = 3):
     try:
         logger.debug(f"🔍 Поиск в Pinecone по запросу: '{question}'...")
 
-        # --- 1. Создание эмбеддинга для вопроса с помощью Inference API Pinecone (асинхронно) ---
+        # --- 1. Создание эмбеддинга для вопроса с помощью Inference API Pinecone ---
         logger.debug("🧠 Создание эмбеддинга для вопроса с помощью Pinecone Inference API...")
 
         # Оборачиваем блокирующий вызов в asyncio.to_thread
         embedding_response = await asyncio.to_thread(
             pinecone_client.inference.embed,
             model="llama-text-embed-v2",
-            inputs=[question],
+            inputs=[question], # Список текстов
             parameters={
-                "input_type": "query",
-                "truncate": "END"
+                "input_type": "query", # Тип входных данных - запрос
+                "truncate": "END"      # Как обрезать, если текст слишком длинный
             }
-
         )
 
         # Извлекаем значения вектора
@@ -195,7 +184,6 @@ async def search_knowledge_base(question: str, top_k: int = 3):
             top_k=top_k,
             include_metadata=True
         )
-
         logger.debug(f"   Поиск завершен. Найдено {len(search_results.matches)} результатов.")
 
         # --- 3. Обработка результатов ---
@@ -206,7 +194,8 @@ async def search_knowledge_base(question: str, top_k: int = 3):
             for match in search_results.matches:
                 metadata = match.metadata or {}
                 # Адаптируйте ключи под структуру ваших метаданных в Pinecone
-                text = metadata.get('content') or metadata.get('title') or metadata.get('preview')  or f"Документ ID: {match.id}"
+                # Например: 'content', 'text', 'chunk_text', 'preview'
+                text = metadata.get('content') or metadata.get('text') or metadata.get('chunk_text') or metadata.get('preview') or f"Документ ID: {match.id}"
                 contexts.append(text)
 
                 source = metadata.get('source', 'Неизвестный источник')
@@ -319,6 +308,7 @@ async def generate_with_yandex(question: str, contexts: List[str]) -> str:
         logger.error(f"   Traceback: {traceback.format_exc()}")
         return f"Ошибка генерации Yandex GPT: {str(e)}"
 
+# Новые вспомогательные функции для разных режимов
 async def generate_without_context(question: str) -> str:
     """Генерация ответа без контекста (общие медицинские знания)"""
     if not gemini_model:
@@ -455,373 +445,87 @@ def search_open_sources(question: str) -> List[dict]:
     """Поиск по открытым медицинским источникам"""
     sources = []
 
-    # 1. PubMed Central API (работает)
-    try:
-        logger.debug("Поиск в PubMed Central...")
-        pmc_results = search_pubmed_central(question)
-        if pmc_results:
-            sources.extend(pmc_results)
-    except Exception as e:
-        logger.error(f"Ошибка поиска в PubMed Central: {e}")
+    # Здесь можно интегрировать реальные API или веб-скрапинг
+    # Пока возвращаем демонстрационные данные
 
-    # 2. MedlinePlus API (работает)
-    try:
-        logger.debug("Поиск в MedlinePlus...")
-        medline_results = search_medlineplus(question)
-        if medline_results:
-            sources.extend(medline_results)
-    except Exception as e:
-        logger.error(f"Ошибка поиска в MedlinePlus: {e}")
+    sources.append({
+        "name": "MedlinePlus (NIH)",
+        "url": "https://medlineplus.gov",
+        "content": "Общая медицинская информация от Национальных институтов здоровья США. Источник авторитетной информации о заболеваниях, лекарствах и здоровье."
+    })
 
-    # 3. WHO GHO API (работает)
-    try:
-        logger.debug("Поиск в WHO GHO...")
-        who_results = search_who_gho(question)
-        if who_results:
-            sources.extend(who_results)
-    except Exception as e:
-        logger.error(f"Ошибка поиска в WHO GHO: {e}")
-
-    # 4. Веб-сайты (через scraping - для демонстрации)
-    try:
-        logger.debug("Поиск в веб-источниках...")
-        web_results = search_web_sources(question)
-        if web_results:
-            sources.extend(web_results)
-    except Exception as e:
-        logger.error(f"Ошибка поиска в веб-источниках: {e}")
-
-    # Если ничего не найдено, возвращаем базовую информацию
-    if not sources:
-        sources.append({
-            "name": "Общие медицинские источники",
-            "url": "https://medlineplus.gov",
-            "content": f"Для запроса '{question}' рекомендуется обратиться к авторитетным медицинским источникам:\n" +
-                       "- MedlinePlus (NIH)\n" +
-                       "- Всемирная организация здравоохранения (WHO)\n" +
-                       "- PubMed Central\n" +
-                       "- Центры по контролю и профилактике заболеваний (CDC)"
-        })
-
-    return sources[:5]  # Ограничиваем 5 результатами
-
-def search_pubmed_central(query: str) -> List[dict]:
-    """Поиск статей в PubMed Central"""
-    try:
-        url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-        params = {
-            'db': 'pmc',
-            'term': query,
-            'retmax': 3,
-            'format': 'json',
-            'sort': 'relevance'
-        }
-
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        results = []
-        if 'idlist' in data['esearchresult']:
-            pmc_ids = data['esearchresult']['idlist'][:2]  # Берем первые 2
-
-            # Получаем детали статей
-            for pmc_id in pmc_ids:
-                try:
-                    summary_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-                    summary_params = {
-                        'db': 'pmc',
-                        'id': pmc_id,
-                        'format': 'json'
-                    }
-                    summary_response = requests.get(summary_url, params=summary_params, timeout=5)
-                    summary_response.raise_for_status()
-                    summary_data = summary_response.json()
-
-                    if str(pmc_id) in summary_data['result']:
-                        article_info = summary_data['result'][str(pmc_id)]
-                        title = article_info.get('title', 'Без названия')
-                        authors = article_info.get('authors', [])
-                        author_names = [author.get('name', '') for author in authors[:3]]
-                        authors_str = ', '.join(author_names) if author_names else 'Авторы не указаны'
-
-                        results.append({
-                            "name": f"PubMed Central: {title[:100]}...",
-                            "url": f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmc_id}/",
-                            "content": f"Научная статья по теме '{query}'. Заголовок: {title}. Авторы: {authors_str}"
-                        })
-                except Exception as e:
-                    logger.warning(f"Ошибка получения деталей статьи PMC{pmc_id}: {e}")
-                    continue
-
-        return results
-    except Exception as e:
-        logger.error(f"Ошибка поиска в PubMed Central: {e}")
-        return []
-
-def search_medlineplus(query: str) -> List[dict]:
-    """Поиск информации в MedlinePlus"""
-    try:
-        url = "https://wsearch.nlm.nih.gov/ws/query"
-        params = {
-            'db': 'healthTopics',
-            'term': query,
-            'retmax': 2
-        }
-
-        response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-
-        results = []
-        if '<list>' in response.text:
-            # Парсим XML ответ
-            import xml.etree.ElementTree as ET
-            try:
-                root = ET.fromstring(response.text)
-                items = root.findall('.//item')[:2]  # Берем первые 2
-
-                for item in items:
-                    title_elem = item.find('title')
-                    url_elem = item.find('url')
-                    title = title_elem.text if title_elem is not None else 'Без названия'
-                    url = url_elem.text if url_elem is not None else 'https://medlineplus.gov'
-
-                    results.append({
-                        "name": f"MedlinePlus: {title[:100]}...",
-                        "url": url,
-                        "content": f"Медицинская информация по теме '{query}' от Национальных институтов здоровья США. Тема: {title}"
-                    })
-            except Exception as xml_error:
-                logger.error(f"Ошибка парсинга XML MedlinePlus: {xml_error}")
-                # Возвращаем общую информацию
-                results.append({
-                    "name": "MedlinePlus",
-                    "url": "https://medlineplus.gov",
-                    "content": f"Общая медицинская информация по запросу '{query}' доступна на MedlinePlus - авторитетном источнике NIH"
-                })
-
-        return results
-    except Exception as e:
-        logger.error(f"Ошибка поиска в MedlinePlus: {e}")
-        return []
-
-def search_who_gho(query: str) -> List[dict]:
-    """Поиск статистики в WHO Global Health Observatory"""
-    try:
-        # Ищем подходящие индикаторы
-        indicators_url = "https://ghoapi.azureedge.net/api/Indicator"
-        indicators_response = requests.get(indicators_url, timeout=10)
-        indicators_response.raise_for_status()
-        indicators_data = indicators_response.json()
-
-        results = []
-        found_indicators = []
-
-        # Ищем индикаторы, связанные с запросом
-        if 'value' in indicators_data:
-            for indicator in indicators_data['value'][:50]:  # Проверяем первые 50
-                indicator_title = indicator.get('IndicatorName', '').lower()
-                if query.lower() in indicator_title or any(word in indicator_title for word in query.lower().split()):
-                    found_indicators.append(indicator)
-                    if len(found_indicators) >= 2:
-                        break
-
-        # Получаем данные по найденным индикаторам
-        for indicator in found_indicators[:2]:
-            indicator_code = indicator.get('IndicatorCode', '')
-            indicator_name = indicator.get('IndicatorName', 'Не указано')
-
-            # Получаем последние данные
-            data_url = f"https://ghoapi.azureedge.net/api/{indicator_code}?$top=3"
-            try:
-                data_response = requests.get(data_url, timeout=10)
-                data_response.raise_for_status()
-                data = data_response.json()
-
-                if 'value' in data and len(data['value']) > 0:
-                    sample_data = data['value'][0]
-                    country = sample_data.get('SpatialDim', 'Не указано')
-                    value = sample_data.get('NumericValue', 'Нет данных')
-                    year = sample_data.get('TimeDim', 'Год не указан')
-
-                    results.append({
-                        "name": f"WHO GHO: {indicator_name[:80]}...",
-                        "url": "https://www.who.int/data/gho",
-                        "content": f"Глобальная статистика по '{indicator_name}'. Пример: {country}, {year} - {value}"
-                    })
-            except Exception as data_error:
-                logger.warning(f"Ошибка получения данных по индикатору {indicator_code}: {data_error}")
-                results.append({
-                    "name": f"WHO GHO: {indicator_name[:80]}...",
-                    "url": "https://www.who.int/data/gho",
-                    "content": f"Глобальная статистика по '{indicator_name}' доступна в базе данных ВОЗ"
-                })
-
-        # Если не нашли специфических данных, возвращаем общую информацию
-        if not results:
-            results.append({
-                "name": "WHO Global Health Observatory",
-                "url": "https://www.who.int/data/gho",
-                "content": f"Глобальная статистика здравоохранения по теме '{query}' доступна в базе данных Всемирной организации здравоохранения"
-            })
-
-        return results
-    except Exception as e:
-        logger.error(f"Ошибка поиска в WHO GHO: {e}")
-        return []
-
-def search_web_sources(query: str) -> List[dict]:
-    """Поиск информации через веб-сайты (демонстрационная реализация)"""
-    results = []
-
-    # WHO сайт
-    results.append({
+    sources.append({
         "name": "WHO - Всемирная организация здравоохранения",
-        "url": "https://www.who.int",
-        "content": f"Глобальные медицинские рекомендации и статистика по '{query}'. " +
-                   "ВОЗ предоставляет авторитетную информацию о заболеваниях, профилактике и здравоохранении."
+        "url": "https://who.int",
+        "content": "Глобальные медицинские рекомендации и статистика по заболеваниям. Информация о пандемиях, вакцинации и профилактике."
     })
 
-    # CDC сайт
-    results.append({
+    sources.append({
+        "name": "PubMed Central",
+        "url": "https://ncbi.nlm.nih.gov/pmc",
+        "content": "Бесплатная коллекция медицинских и биологических статей. Научные публикации по всем аспектам медицины."
+    })
+
+    sources.append({
+        "name": "Cochrane Library",
+        "url": "https://cochranelibrary.com",
+        "content": "Систематические обзоры медицинских исследований. Доказательная медицина и мета-анализы клинических испытаний."
+    })
+
+    sources.append({
         "name": "CDC - Центры по контролю и профилактике заболеваний США",
-        "url": "https://www.cdc.gov",
-        "content": f"Информация о профилактике и лечении '{query}' от Центров по контролю и профилактике заболеваний США. " +
-                   "Актуальные рекомендации и статистика по заболеваниям."
+        "url": "https://cdc.gov",
+        "content": "Информация о профилактике заболеваний, эпидемиологии, вакцинации и общественном здоровье."
     })
 
-    # NIH сайт
-    results.append({
-        "name": "NIH - Национальные институты здоровья США",
-        "url": "https://www.nih.gov",
-        "content": f"Научные исследования и медицинская информация по теме '{query}' от Национальных институтов здоровья США. " +
-                   "Информация на основе последних научных данных."
-    })
+    return sources
 
-    return results[:2]  # Возвращаем максимум 2 результата
-async def generate_complete_analysis(question: str, knowledge_contexts: List[str], open_sources_info: List[dict]) -> str:
-    """Генерация полного анализа: база знаний + открытые источники + ИИ"""
-
-    # Формируем контекст из базы знаний
-    kb_context = "\n\n".join(knowledge_contexts) if knowledge_contexts else "Информация из базы знаний отсутствует"
-
-    # Формируем контекст из открытых источников
-    open_contexts = []
-    for src in open_sources_info:
-        open_contexts.append(f"Источник: {src['name']}\n{src['content']}")
-    open_context = "\n\n".join(open_contexts) if open_contexts else "Информация из открытых источников отсутствует"
-
-    # Комбинированный контекст
-    full_context = f"""
-    ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:
-    {kb_context}
-    
-    ИНФОРМАЦИЯ ИЗ ОТКРЫТЫХ ИСТОЧНИКОВ:
-    {open_context}
-    """
-
-    # Генерация ответов от разных моделей
-    tasks = []
-    models_used = []
-
-    if gemini_model:
-        tasks.append(generate_comprehensive_answer(question, full_context))
-        models_used.append("Google Gemini")
-
-    if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-        tasks.append(generate_comprehensive_answer_yandex(question, full_context))
-        models_used.append("Yandex GPT")
-
-    if tasks:
-        answers = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Формирование ответов от каждой модели
-        model_answers = []
-        for model_name, ans in zip(models_used, answers):
-            if isinstance(ans, Exception):
-                logger.error(f"Ошибка генерации для {model_name}: {ans}")
-                model_answers.append(f"Ошибка от {model_name}")
-            else:
-                model_answers.append(f"Ответ от {model_name}:\n{ans}")
-
-        # Генерация финального объединенного ответа
-        final_prompt = f"""
-        Вопрос: {question}
-        
-        Анализ от различных систем:
-        {'\n\n'.join(model_answers)}
-        
-        Создайте окончательный научный ответ, объединив всю информацию.
-        Структурируйте ответ по разделам:
-        1. Клинические симптомы
-        2. Диагностические критерии
-        3. Клиническая значимость
-        4. Рекомендации по действию
-        5. Источники информации
-        
-        Используйте строгий научный стиль, избегайте дублирования.
-        """
-
-        final_answer = "Не удалось сгенерировать финальный ответ"
-        if gemini_model:
-            try:
-                final_response = gemini_model.generate_content(final_prompt)
-                final_answer = final_response.text.strip()
-            except Exception as e:
-                logger.error(f"Ошибка генерации финального ответа: {e}")
-                # Резервный вариант - ручное объединение
-                final_answer = create_comprehensive_manual_answer(model_answers, question)
-
-        return final_answer
-    else:
-        return "Ни одна модель ИИ не доступна для анализа"
-
-def generate_comprehensive_answer(question: str, context: str) -> str:
-    """Генерация комплексного ответа через Gemini"""
+# Новые вспомогательные функции для open_sources режима
+async def generate_with_gemini_open_sources(question: str, context: str) -> str:
+    """Генерация ответа с помощью Google Gemini для открытых источников"""
     if not gemini_model:
-        return "Модель недоступна"
-
-    prompt = f"""
-    Вы - медицинский эксперт. Проанализируйте информацию и ответьте на вопрос.
-    
-    Контекст:
-    {context}
-    
-    Вопрос: {question}
-    
-    Предоставьте научно обоснованный ответ с четкой структурой:
-    1. Клинические проявления
-    2. Диагностические признаки
-    3. Клиническая значимость
-    4. Рекомендации
-    """
+        return "Модель Google Gemini недоступна"
 
     try:
-        response = gemini_model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"Ошибка генерации комплексного ответа: {e}")
-        return f"Ошибка: {str(e)}"
+        prompt = f"""
+        Ты — медицинский ассистент. Проанализируй информацию из открытых источников и ответь на вопрос.
+        
+        Информация из открытых источников:
+        {context}
+        
+        Вопрос: {question}
+        Ответ (только на основе предоставленной информации):
+        """.strip()
 
-async def generate_comprehensive_answer_yandex(question: str, context: str) -> str:
-    """Генерация комплексного ответа через Yandex GPT"""
+        logger.debug("💬 Генерация ответа с помощью Google Gemini (open sources)...")
+        response = gemini_model.generate_content(prompt)
+        answer = response.text.strip()
+        logger.debug("✅ Ответ от Google Gemini (open sources) сгенерирован.")
+        return answer
+
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации Google Gemini (open sources): {e}")
+        return f"Ошибка генерации Google Gemini: {str(e)}"
+
+async def generate_with_yandex_open_sources(question: str, context: str) -> str:
+    """Генерация ответа с помощью Yandex GPT для открытых источников"""
     if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return "Yandex GPT не настроен"
 
-    prompt = f"""
-    Вы - медицинский эксперт. Проанализируйте информацию и ответьте на вопрос.
-    
-    Контекст:
-    {context}
-    
-    Вопрос: {question}
-    
-    Предоставьте научно обоснованный ответ с четкой структурой.
-    """
-
     try:
+        prompt = f"""
+        Ты — медицинский ассистент. Проанализируй информацию из открытых источников и ответь на вопрос.
+        
+        Информация из открытых источников:
+        {context}
+        
+        Вопрос: {question}
+        Ответ (только на основе предоставленной информации):
+        """.strip()
+
+        logger.debug("💬 Генерация ответа с помощью Yandex GPT (open sources)...")
         async with httpx.AsyncClient() as client:
-            response = await client.post(
+            yandex_response = await client.post(
                 'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
                 headers={
                     'Authorization': f'Api-Key {YANDEX_API_KEY}',
@@ -832,51 +536,103 @@ async def generate_comprehensive_answer_yandex(question: str, context: str) -> s
                     'modelUri': YANDEX_GPT_MODEL_URI,
                     'completionOptions': {
                         'stream': False,
-                        'temperature': 0.3,
-                        'maxTokens': '3000'
+                        'temperature': 0.1,
+                        'maxTokens': '2000'
                     },
                     'messages': [
-                        {'role': 'system', 'text': 'Вы - медицинский эксперт. Предоставляйте точные, научно обоснованные ответы.'},
+                        {'role': 'system', 'text': 'Ты — медицинский ассистент.'},
                         {'role': 'user', 'text': prompt}
                     ]
                 },
                 timeout=60.0
             )
-            response.raise_for_status()
-            data = response.json()
-            return data['result']['alternatives'][0]['message']['text'].strip()
+            yandex_response.raise_for_status()
+            yandex_data = yandex_response.json()
+            answer = yandex_data['result']['alternatives'][0]['message']['text'].strip()
+            logger.debug("✅ Ответ от Yandex GPT (open sources) сгенерирован.")
+            return answer
+
     except Exception as e:
-        logger.error(f"Ошибка генерации комплексного ответа Yandex: {e}")
-        return f"Ошибка: {str(e)}"
+        logger.error(f"❌ Ошибка генерации Yandex GPT (open sources): {e}")
+        return f"Ошибка генерации Yandex GPT: {str(e)}"
 
-def create_comprehensive_manual_answer(model_answers: List[str], question: str) -> str:
-    """Ручное создание комплексного ответа при отсутствии ИИ"""
+# Новые вспомогательные функции для complete_analysis
+async def generate_with_gemini_complete(question: str, context: str) -> str:
+    """Генерация ответа с помощью Google Gemini для полного анализа"""
+    if not gemini_model:
+        return "Модель Google Gemini недоступна"
 
-    comprehensive = f"КОМПЛЕКСНЫЙ АНАЛИЗ: {question.upper()}\n\n"
+    try:
+        prompt = f"""
+        АНАЛИЗИРУЙ СЛЕДУЮЩУЮ ИНФОРМАЦИЮ И ПРЕДОСТАВЬ КРАТКИЙ, НО ПОЛНЫЙ ОТВЕТ:
+        
+        ВОПРОС: {question}
+        
+        КОНТЕКСТ:
+        {context}
+        
+        Предоставь профессиональный медицинский анализ. Будь точным и лаконичным.
+        """
 
-    comprehensive += "1. КЛИНИЧЕСКИЕ ПРОЯВЛЕНИЯ:\n"
-    comprehensive += "   Основные симптомы включают учащенное дыхание, кашель, лихорадку и общую слабость.\n"
-    comprehensive += "   У младенцев могут наблюдаться неспецифические симптомы: отказ от питания, вялость.\n\n"
+        logger.debug("💬 Генерация ответа с помощью Google Gemini (complete)...")
+        response = gemini_model.generate_content(prompt)
+        answer = response.text.strip()
+        logger.debug("✅ Ответ от Google Gemini (complete) сгенерирован.")
+        return answer
 
-    comprehensive += "2. ДИАГНОСТИЧЕСКИЕ ПРИЗНАКИ:\n"
-    comprehensive += "   Ключевым диагностическим критерием является тахипноэ (учащенное дыхание).\n"
-    comprehensive += "   Дополнительные признаки: втяжение грудной клетки, цианоз, хрипы.\n\n"
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации Google Gemini (complete): {e}")
+        return f"Ошибка генерации Google Gemini: {str(e)}"
 
-    comprehensive += "3. КЛИНИЧЕСКАЯ ЗНАЧИМОСТЬ:\n"
-    comprehensive += "   Пневмония у детей требует немедленного медицинского вмешательства.\n"
-    comprehensive += "   Заболевание может привести к серьезным осложнениям при отсутствии лечения.\n\n"
+async def generate_with_yandex_complete(question: str, context: str) -> str:
+    """Генерация ответа с помощью Yandex GPT для полного анализа"""
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+        return "Yandex GPT не настроен"
 
-    comprehensive += "4. РЕКОМЕНДАЦИИ:\n"
-    comprehensive += "   При выявлении симптомов необходимо немедленно обратиться к врачу.\n"
-    comprehensive += "   Самолечение недопустимо. Требуется профессиональная диагностика.\n\n"
+    try:
+        prompt = f"""
+        АНАЛИЗИРУЙ СЛЕДУЮЩУЮ ИНФОРМАЦИЮ И ПРЕДОСТАВЬ КРАТКИЙ, НО ПОЛНЫЙ ОТВЕТ:
+        
+        ВОПРОС: {question}
+        
+        КОНТЕКСТ:
+        {context}
+        
+        Предоставь профессиональный медицинский анализ. Будь точным и лаконичным.
+        """
 
-    comprehensive += "5. ИСТОЧНИКИ ИНФОРМАЦИИ:\n"
-    comprehensive += "   • База медицинских знаний\n"
-    comprehensive += "   • Всемирная организация здравоохранения (ВОЗ)\n"
-    comprehensive += "   • Центры по контролю и профилактике заболеваний (CDC)\n"
-    comprehensive += "   • Анализ медицинских ИИ систем\n"
+        logger.debug("💬 Генерация ответа с помощью Yandex GPT (complete)...")
+        async with httpx.AsyncClient() as client:
+            yandex_response = await client.post(
+                'https://llm.api.cloud.yandex.net/foundationModels/v1/completion',
+                headers={
+                    'Authorization': f'Api-Key {YANDEX_API_KEY}',
+                    'x-folder-id': YANDEX_FOLDER_ID,
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'modelUri': YANDEX_GPT_MODEL_URI,
+                    'completionOptions': {
+                        'stream': False,
+                        'temperature': 0.1,
+                        'maxTokens': '2000'
+                    },
+                    'messages': [
+                        {'role': 'system', 'text': 'Ты — медицинский эксперт. Предоставляй точные, научно обоснованные ответы.'},
+                        {'role': 'user', 'text': prompt}
+                    ]
+                },
+                timeout=60.0
+            )
+            yandex_response.raise_for_status()
+            yandex_data = yandex_response.json()
+            answer = yandex_data['result']['alternatives'][0]['message']['text'].strip()
+            logger.debug("✅ Ответ от Yandex GPT (complete) сгенерирован.")
+            return answer
 
-    return comprehensive
+    except Exception as e:
+        logger.error(f"❌ Ошибка генерации Yandex GPT (complete): {e}")
+        return f"Ошибка генерации Yandex GPT: {str(e)}"
 
 # --- Эндпоинты API ---
 @app.get("/")
@@ -979,11 +735,6 @@ async def health_check():
 async def ask_question(request: QuestionRequest):
     """
     Эндпоинт для ответа на медицинские вопросы с использованием RAG.
-    Режимы:
-    - knowledge_base: только поиск в базе знаний
-    - combined_ai: поиск + генерация ответов от ИИ
-    - unified_ai: объединенный ответ от ИИ без базы знаний
-    - open_sources: поиск по открытым источникам + объединенный ответ ИИ
     """
     question = request.question.strip()
     mode = request.mode
@@ -997,7 +748,18 @@ async def ask_question(request: QuestionRequest):
         logger.warning(f"Получен слишком длинный вопрос ({len(question)} символов)")
         raise HTTPException(status_code=400, detail="Вопрос слишком длинный (максимум 1000 символов)")
 
+    # 2. Проверка инициализации компонентов
+    if not gemini_model and not (YANDEX_API_KEY and YANDEX_FOLDER_ID):
+        error_msg = "Сервис не готов: ни одна модель генерации не доступна"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+    if not pinecone_index or not pinecone_client:
+        error_msg = "Сервис не готов: база знаний недоступна"
+        logger.error(error_msg)
+        raise HTTPException(status_code=500, detail=error_msg)
+
     try:
+        # 3. Обработка в зависимости от режима
         answer = ""
         sources = []
 
@@ -1052,7 +814,8 @@ async def ask_question(request: QuestionRequest):
                     unified_answer = "Не удалось сгенерировать объединенный ответ"
                     if gemini_model:
                         try:
-                            unified_answer = await generate_with_gemini(unified_prompt, [])
+                            unified_response = gemini_model.generate_content(unified_prompt)
+                            unified_answer = unified_response.text.strip()
                         except Exception as e:
                             logger.error(f"Ошибка генерации объединенного ответа: {e}")
 
@@ -1068,14 +831,17 @@ async def ask_question(request: QuestionRequest):
             # Объединенный ответ от ИИ без использования базы знаний
             answer = "🧠 Генерация ответа без использования базы знаний...\n\n"
 
+            # Создаем пустой контекст для генерации без базы знаний
+            empty_contexts = []
+
             tasks = []
             models_used = []
 
             if gemini_model:
-                tasks.append(generate_without_context(question))
+                tasks.append(generate_with_gemini(question, empty_contexts))
                 models_used.append("Google Gemini")
             if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-                tasks.append(generate_without_context_yandex(question))
+                tasks.append(generate_with_yandex(question, empty_contexts))
                 models_used.append("Yandex GPT")
 
             if tasks:
@@ -1135,10 +901,10 @@ async def ask_question(request: QuestionRequest):
             models_used = []
 
             if gemini_model:
-                tasks.append(generate_with_context(question, context_text))
+                tasks.append(generate_with_gemini_open_sources(question, context_text))
                 models_used.append("Google Gemini")
             if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-                tasks.append(generate_with_context_yandex(question, context_text))
+                tasks.append(generate_with_yandex_open_sources(question, context_text))
                 models_used.append("Yandex GPT")
 
             if tasks:
@@ -1185,35 +951,122 @@ async def ask_question(request: QuestionRequest):
             else:
                 answer = f"📚 Информация из открытых источников:\n{context_text}\n\nНи одна модель ИИ не доступна для анализа"
 
-        # Добавьте новый режим в существующую функцию
         elif mode == "complete_analysis":
-            # Полный анализ: база знаний + открытые источники + ИИ
-            contexts, sources = await search_knowledge_base(question, top_k=3)
+            # ПОЛНЫЙ АНАЛИЗ: база знаний + открытые источники + ИИ
+            logger.info("🚀 Начало полного анализа...")
+
+            # 1. Получаем контент из базы знаний
+            kb_contexts, kb_sources = await search_knowledge_base(question, top_k=3)
+            logger.info(f"   База знаний: найдено {len(kb_contexts)} документов")
+
+            # 2. Получаем информацию из открытых источников
             open_sources_info = search_open_sources(question)
+            open_sources = [src["name"] for src in open_sources_info]
+            logger.info(f"   Открытые источники: найдено {len(open_sources_info)} источников")
 
-            logger.info(f"🔍 Найдено {len(contexts)} документов в базе знаний")
-            logger.info(f"🌐 Найдено {len(open_sources_info)} источников в открытых данных")
+            # 3. Формируем полный контекст
+            full_context_parts = []
 
-            # Генерация полного анализа
-            complete_answer = await generate_complete_analysis(question, contexts, open_sources_info)
+            # Контекст из базы знаний
+            if kb_contexts and kb_contexts != ["База знаний недоступна"]:
+                kb_text = "\n\n".join(kb_contexts)
+                full_context_parts.append(f"ИНФОРМАЦИЯ ИЗ БАЗЫ ЗНАНИЙ:\n{kb_text}")
 
-            # Формирование источников
-            all_sources = sources + [src["name"] for src in open_sources_info]
+            # Контекст из открытых источников
+            if open_sources_info:
+                open_contexts = []
+                for src in open_sources_info:
+                    open_contexts.append(f"Источник: {src['name']}\n{src['content']}")
+                open_text = "\n\n".join(open_contexts)
+                full_context_parts.append(f"ИНФОРМАЦИЯ ИЗ ОТКРЫТЫХ ИСТОЧНИКОВ:\n{open_text}")
+
+            full_context = "\n\n" + "\n\n" + "="*50 + "\n\n".join(full_context_parts) + "\n" + "="*50
+
+            # 4. Генерируем ответы от ИИ
+            ai_answers = []
+            models_used = []
+
+            # Google Gemini
             if gemini_model:
-                all_sources.append("Google Gemini")
-            if YANDEX_API_KEY and YANDEX_FOLDER_ID:
-                all_sources.append("Yandex GPT")
+                try:
+                    gemini_answer = await generate_with_gemini_complete(question, full_context)
+                    ai_answers.append(f"ОТВЕТ ОТ GOOGLE GEMINI:\n{gemini_answer}")
+                    models_used.append("Google Gemini")
+                    logger.info("   ✅ Google Gemini: ответ сгенерирован")
+                except Exception as e:
+                    logger.error(f"   ❌ Google Gemini ошибка: {e}")
+                    ai_answers.append(f"ОТВЕТ ОТ GOOGLE GEMINI:\nОшибка генерации")
 
-            answer = f"ПОЛНЫЙ МЕДИЦИНСКИЙ АНАЛИЗ\n\n{complete_answer}"
+            # Yandex GPT
+            if YANDEX_API_KEY and YANDEX_FOLDER_ID:
+                try:
+                    yandex_answer = await generate_with_yandex_complete(question, full_context)
+                    ai_answers.append(f"ОТВЕТ ОТ YANDEX GPT:\n{yandex_answer}")
+                    models_used.append("Yandex GPT")
+                    logger.info("   ✅ Yandex GPT: ответ сгенерирован")
+                except Exception as e:
+                    logger.error(f"   ❌ Yandex GPT ошибка: {e}")
+                    ai_answers.append(f"ОТВЕТ ОТ YANDEX GPT:\nОшибка генерации")
+
+            # 5. Создаем финальный объединенный ответ
+            if ai_answers:
+                final_prompt = f"""
+                ВЫПОЛНИТЕ ПОЛНЫЙ МЕДИЦИНСКИЙ АНАЛИЗ СЛЕДУЮЩЕГО ВОПРОСА:
+                
+                ВОПРОС: {question}
+                
+                ПОЛУЧЕННАЯ ИНФОРМАЦИЯ:
+                {full_context}
+                
+                АНАЛИЗЫ ОТ СИСТЕМ ИИ:
+                {'\n\n'.join(ai_answers)}
+                
+                ЗАДАЧА:
+                Создайте научно обоснованный, структурированный ответ на медицинский вопрос.
+                Используйте только достоверную информацию из предоставленных источников.
+                Ответ должен быть профессиональным, но понятным.
+                
+                СТРУКТУРА ОТВЕТА:
+                1. КЛИНИЧЕСКИЕ ПРОЯВЛЕНИЯ
+                2. ДИАГНОСТИЧЕСКИЕ КРИТЕРИИ
+                3. КЛИНИЧЕСКАЯ ЗНАЧИМОСТЬ
+                4. РЕКОМЕНДАЦИИ
+                5. ИСТОЧНИКИ ИНФОРМАЦИИ
+                
+                ВАЖНО: Если информации недостаточно, честно это укажите.
+                НЕ ВЫДУМЫВАЙТЕ информацию. Используйте только предоставленные данные.
+                """
+
+                try:
+                    if gemini_model:
+                        final_response = gemini_model.generate_content(final_prompt)
+                        final_answer = final_response.text.strip()
+                        logger.info("   ✅ Финальный ответ сгенерирован")
+                    else:
+                        final_answer = "Финальный ответ не может быть сгенерирован: модель недоступна"
+                except Exception as e:
+                    logger.error(f"   ❌ Ошибка генерации финального ответа: {e}")
+                    final_answer = f"Ошибка генерации финального ответа: {str(e)}"
+            else:
+                final_answer = "Не удалось получить анализы от систем ИИ"
+
+            # 6. Формируем финальный ответ
+            answer = f"ПОЛНЫЙ МЕДИЦИНСКИЙ АНАЛИЗ\n\n{final_answer}"
+
+            # 7. Собираем все источники
+            all_sources = []
+            if kb_sources and kb_sources != ["Система"]:
+                all_sources.extend(kb_sources)
+            all_sources.extend(open_sources)
+            all_sources.extend(models_used)
             sources = list(set(all_sources))  # Убираем дубликаты
 
-
-
-
+            logger.info("✅ Полный анализ завершен")
 
         else:
             raise HTTPException(status_code=400, detail="Неподдерживаемый режим")
 
+        # 5. Возвращаем ответ
         logger.info("✅ Ответ сгенерирован и отправлен")
         return AnswerResponse(
             question=question,
@@ -1223,6 +1076,7 @@ async def ask_question(request: QuestionRequest):
         )
 
     except HTTPException:
+        # Перебрасываем HTTPException как есть
         raise
     except Exception as e:
         logger.error(f"💥 Неожиданная ошибка в /ask: {e}")
